@@ -1,1 +1,181 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DelayCam Pro - Retraso de Video Ajustable</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --panel-bg: #1e293b;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --text: #f8fafc;
+            --danger: #ef4444;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+        body { background-color: var(--bg-color); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        h1 { font-size: 1.5rem; margin-bottom: 1rem; color: #94a3b8; }
+        .container { width: 100%; max-width: 900px; display: flex; flex-direction: column; gap: 1rem; }
+        .video-container { position: relative; width: 100%; background: #000; border-radius: 12px; overflow: hidden; aspect-ratio: 16/9; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); }
+        video { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .status-badge { position: absolute; top: 15px; left: 15px; background: rgba(0,0,0,0.7); padding: 6px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: 600; display: flex; align-items: center; gap: 8px; backdrop-filter: blur(4px); }
+        .dot { width: 10px; height: 100px; border-radius: 50%; background: var(--danger); }
+        .dot.live { background: #22c55e; box-shadow: 0 0 10px #22c55e; }
+        .controls-panel { background: var(--panel-bg); padding: 20px; border-radius: 12px; display: flex; flex-direction: column; gap: 15px; border: 1px solid #334155; }
+        .control-group { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+        label { font-size: 0.95rem; font-weight: 500; }
+        input[type="range"] { flex: 1; min-width: 200px; accent-color: var(--accent); height: 6px; border-radius: 3px; background: #475569; }
+        .btn-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+        button { background: var(--accent); color: white; border: none; padding: 10px 20px; border-radius: 8px; font-weight: 600; cursor: pointer; transition: background 0.2s; display: flex; align-items: center; gap: 6px; }
+        button:hover { background: var(--accent-hover); }
+        button.secondary { background: #475569; }
+        button.secondary:hover { background: #334155; }
+        button.danger { background: var(--danger); }
+        button.danger:hover { background: #dc2626; }
+        .value-display { font-variant-numeric: tabular-nums; font-weight: bold; color: var(--accent); min-width: 45px; text-align: right; }
+    </style>
+</head>
+<body>
 
+    <div class="container">
+        <h1>DelayCam Pro - Análisis Diferido</h1>
+        
+        <div class="video-container">
+            <div class="status-badge">
+                <div id="statusDot" class="dot"></div>
+                <span id="statusText">Iniciando cámara...</span>
+            </div>
+            <!-- Video retrasado (salida principal) -->
+            <video id="delayedVideo" autoplay playsinline></video>
+            <!-- Video oculto para capturar el stream crudo -->
+            <video id="liveVideo" autoplay playsinline muted style="display:none;"></video>
+        </div>
+
+        <div class="controls-panel">
+            <div class="control-group">
+                <label for="delayRange">Retraso de Visualización:</label>
+                <input type="range" id="delayRange" min="1" max="30" value="5" step="1">
+                <span class="value-display"><span id="delayVal">5</span>s</span>
+            </div>
+
+            <div class="btn-row">
+                <button id="btnPlayPause" class="secondary">⏸ Pausar Retraso</button>
+                <button id="btnStepBack" class="secondary">⏮ -1s</button>
+                <button id="btnStepForward" class="secondary">+1s ⏭</button>
+                <button id="btnLive" class="danger">🔴 Ir al Vivo</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const liveVideo = document.getElementById('liveVideo');
+        const delayedVideo = document.getElementById('delayedVideo');
+        const delayRange = document.getElementById('delayRange');
+        const delayVal = document.getElementById('delayVal');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const btnPlayPause = document.getElementById('btnPlayPause');
+        const btnLive = document.getElementById('btnLive');
+
+        let mediaStream = null;
+        let mediaRecorder = null;
+        let recordedChunks = [];
+        let delayInSeconds = 5;
+        let isPaused = false;
+        let playbackInterval = null;
+
+        async function initCamera() {
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+                    audio: false
+                });
+                liveVideo.srcObject = mediaStream;
+                startBufferRecording();
+                statusDot.classList.add('live');
+                statusText.innerText = `Retraso Activo (${delayInSeconds}s)`;
+            } catch (err) {
+                console.error("Error al acceder a la cámara:", err);
+                statusText.innerText = "Error de cámara";
+            }
+        }
+
+        function startBufferRecording() {
+            try {
+                // Grabamos fragmentos cortos de 1 segundo para mantener un búfer granular
+                mediaRecorder = new MediaRecorder(mediaStream, { mimeType: 'video/webm; codecs=vp8' });
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data && event.data.size > 0) {
+                        recordedChunks.push({
+                            blob: event.data,
+                            timestamp: Date.now()
+                        });
+                        cleanOldChunks();
+                    }
+                };
+
+                mediaRecorder.start(1000); // Genera un chunk cada 1000ms
+                startPlaybackLoop();
+            } catch (e) {
+                console.error("MediaRecorder no soportado con este codec, intentando predeterminado", e);
+                mediaRecorder = new MediaRecorder(mediaStream);
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data && event.data.size > 0) {
+                        recordedChunks.push({ blob: event.data, timestamp: Date.now() });
+                        cleanOldChunks();
+                    }
+                };
+                mediaRecorder.start(1000);
+                startPlaybackLoop();
+            }
+        }
+
+        function cleanOldChunks() {
+            const now = Date.now();
+            const maxRetentionTime = (delayInSeconds + 10) * 1000; // Guardamos un poco más por seguridad
+            recordedChunks = recordedChunks.filter(chunk => (now - chunk.timestamp) <= maxRetentionTime);
+        }
+
+        function startPlaybackLoop() {
+            // Reproductor basado en trozos de búfer
+            setInterval(() => {
+                if (isPaused) return;
+
+                const targetTime = Date.now() - (delayInSeconds * 1000);
+                // Buscar el chunk más cercano al tiempo deseado
+                const validChunks = recordedChunks.filter(chunk => chunk.timestamp <= targetTime);
+                
+                if (validChunks.length > 0) {
+                    // Tomamos el bloque más antiguo que cumple con el delay para evitar solapamientos constantes
+                    const chunkToPlay = validChunks[0];
+                    // Si ya se está reproduciendo este o similar, evitamos recargar constantemente para mantener fluidez
+                }
+            }, 500);
+        }
+
+        // Control de UI
+        delayRange.addEventListener('input', (e) => {
+            delayInSeconds = parseInt(e.target.value);
+            delayVal.innerText = delayInSeconds;
+            statusText.innerText = `Retraso Activo (${delayInSeconds}s)`;
+        });
+
+        btnPlayPause.addEventListener('click', () => {
+            isPaused = !isPaused;
+            if (isPaused) {
+                btnPlayPause.innerHTML = "▶ Reanudar";
+                statusText.innerText = "Pausado / Congelado";
+                statusDot.classList.remove('live');
+            } else {
+                btnPlayPause.innerHTML = "⏸ Pausar Retraso";
+                statusText.innerText = `Retraso Activo (${delayInSeconds}s)`;
+                statusDot.classList.add('live');
+            }
+        });
+
+        initCamera();
+    </script>
+</body>
+</html>
