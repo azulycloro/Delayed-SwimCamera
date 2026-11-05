@@ -19,9 +19,12 @@
         .container { width: 100%; max-width: 900px; display: flex; flex-direction: column; gap: 1rem; }
         .video-container { position: relative; width: 100%; background: #000; border-radius: 12px; overflow: hidden; aspect-ratio: 16/9; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); }
         video { width: 100%; height: 100%; object-fit: cover; display: block; }
-        .status-badge { position: absolute; top: 15px; left: 15px; background: rgba(0,0,0,0.7); padding: 6px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: 600; display: flex; align-items: center; gap: 8px; backdrop-filter: blur(4px); }
-        .dot { width: 10px; height: 100px; border-radius: 50%; background: var(--danger); }
+        .status-badge { position: absolute; top: 15px; left: 15px; background: rgba(0,0,0,0.7); padding: 6px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: 600; display: flex; align-items: center; gap: 8px; backdrop-filter: blur(4px); z-index: 10; }
+        
+        /* CORRECCIÓN VISUAL: El punto ahora es un círculo en lugar de una línea */
+        .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); }
         .dot.live { background: #22c55e; box-shadow: 0 0 10px #22c55e; }
+        
         .controls-panel { background: var(--panel-bg); padding: 20px; border-radius: 12px; display: flex; flex-direction: column; gap: 15px; border: 1px solid #334155; }
         .control-group { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
         label { font-size: 0.95rem; font-weight: 500; }
@@ -47,7 +50,7 @@
                 <span id="statusText">Iniciando cámara...</span>
             </div>
             <!-- Video retrasado (salida principal) -->
-            <video id="delayedVideo" autoplay playsinline></video>
+            <video id="delayedVideo" autoplay playsinline muted></video>
             <!-- Video oculto para capturar el stream crudo -->
             <video id="liveVideo" autoplay playsinline muted style="display:none;"></video>
         </div>
@@ -76,6 +79,8 @@
         const statusDot = document.getElementById('statusDot');
         const statusText = document.getElementById('statusText');
         const btnPlayPause = document.getElementById('btnPlayPause');
+        const btnStepBack = document.getElementById('btnStepBack');
+        const btnStepForward = document.getElementById('btnStepForward');
         const btnLive = document.getElementById('btnLive');
 
         let mediaStream = null;
@@ -83,7 +88,6 @@
         let recordedChunks = [];
         let delayInSeconds = 5;
         let isPaused = false;
-        let playbackInterval = null;
 
         async function initCamera() {
             try {
@@ -97,13 +101,12 @@
                 statusText.innerText = `Retraso Activo (${delayInSeconds}s)`;
             } catch (err) {
                 console.error("Error al acceder a la cámara:", err);
-                statusText.innerText = "Error de cámara";
+                statusText.innerText = "Error de cámara. Verifica permisos.";
             }
         }
 
         function startBufferRecording() {
             try {
-                // Grabamos fragmentos cortos de 1 segundo para mantener un búfer granular
                 mediaRecorder = new MediaRecorder(mediaStream, { mimeType: 'video/webm; codecs=vp8' });
                 
                 mediaRecorder.ondataavailable = (event) => {
@@ -115,11 +118,10 @@
                         cleanOldChunks();
                     }
                 };
-
-                mediaRecorder.start(1000); // Genera un chunk cada 1000ms
+                mediaRecorder.start(1000); 
                 startPlaybackLoop();
             } catch (e) {
-                console.error("MediaRecorder no soportado con este codec, intentando predeterminado", e);
+                console.error("MediaRecorder no soportado con VP8, intentando predeterminado", e);
                 mediaRecorder = new MediaRecorder(mediaStream);
                 mediaRecorder.ondataavailable = (event) => {
                     if (event.data && event.data.size > 0) {
@@ -134,40 +136,83 @@
 
         function cleanOldChunks() {
             const now = Date.now();
-            const maxRetentionTime = (delayInSeconds + 10) * 1000; // Guardamos un poco más por seguridad
+            const maxRetentionTime = (delayInSeconds + 15) * 1000; 
             recordedChunks = recordedChunks.filter(chunk => (now - chunk.timestamp) <= maxRetentionTime);
         }
 
+        // CORRECCIÓN LÓGICA: Inyección de video y gestión del reproductor
         function startPlaybackLoop() {
-            // Reproductor basado en trozos de búfer
+            let lastPlayedTimestamp = 0; 
+            
             setInterval(() => {
                 if (isPaused) return;
 
                 const targetTime = Date.now() - (delayInSeconds * 1000);
-                // Buscar el chunk más cercano al tiempo deseado
                 const validChunks = recordedChunks.filter(chunk => chunk.timestamp <= targetTime);
                 
                 if (validChunks.length > 0) {
-                    // Tomamos el bloque más antiguo que cumple con el delay para evitar solapamientos constantes
-                    const chunkToPlay = validChunks[0];
-                    // Si ya se está reproduciendo este o similar, evitamos recargar constantemente para mantener fluidez
+                    const chunkToPlay = validChunks[validChunks.length - 1];
+                    
+                    if (chunkToPlay.timestamp !== lastPlayedTimestamp) {
+                        const videoUrl = URL.createObjectURL(chunkToPlay.blob);
+                        
+                        // Liberar memoria del objeto anterior para evitar fugas en iPadOS
+                        if (delayedVideo.src) {
+                            URL.revokeObjectURL(delayedVideo.src);
+                        }
+
+                        delayedVideo.src = videoUrl;
+                        delayedVideo.load();
+                        
+                        delayedVideo.play().catch(err => {
+                            console.error("Autoplay bloqueado. Requiere interacción previa del usuario:", err);
+                        });
+                        
+                        lastPlayedTimestamp = chunkToPlay.timestamp;
+                    }
                 }
             }, 500);
         }
 
-        // Control de UI
-        delayRange.addEventListener('input', (e) => {
-            delayInSeconds = parseInt(e.target.value);
+        // Controles de UI actualizados
+        function updateDelayUI(newDelay) {
+            // Limitar entre 1 y 30 segundos según el rango del input
+            delayInSeconds = Math.max(1, Math.min(30, newDelay)); 
+            delayRange.value = delayInSeconds;
             delayVal.innerText = delayInSeconds;
-            statusText.innerText = `Retraso Activo (${delayInSeconds}s)`;
+            
+            if (!isPaused) {
+                statusText.innerText = `Retraso Activo (${delayInSeconds}s)`;
+            }
+        }
+
+        delayRange.addEventListener('input', (e) => {
+            updateDelayUI(parseInt(e.target.value));
+        });
+
+        btnStepBack.addEventListener('click', () => {
+            updateDelayUI(delayInSeconds - 1);
+        });
+
+        btnStepForward.addEventListener('click', () => {
+            updateDelayUI(delayInSeconds + 1);
+        });
+
+        btnLive.addEventListener('click', () => {
+            updateDelayUI(1); // Mínimo retraso posible
+            statusText.innerText = "Casi en vivo (1s)";
+            if (isPaused) {
+                btnPlayPause.click(); // Reanuda si estaba en pausa
+            }
         });
 
         btnPlayPause.addEventListener('click', () => {
             isPaused = !isPaused;
             if (isPaused) {
                 btnPlayPause.innerHTML = "▶ Reanudar";
-                statusText.innerText = "Pausado / Congelado";
+                statusText.innerText = `Pausado / Congelado (${delayInSeconds}s)`;
                 statusDot.classList.remove('live');
+                delayedVideo.pause();
             } else {
                 btnPlayPause.innerHTML = "⏸ Pausar Retraso";
                 statusText.innerText = `Retraso Activo (${delayInSeconds}s)`;
@@ -175,6 +220,7 @@
             }
         });
 
+        // Iniciar la cámara al cargar la página
         initCamera();
     </script>
 </body>
